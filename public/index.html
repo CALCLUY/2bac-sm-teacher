@@ -21,6 +21,14 @@
       <span class="status-pill" id="statusPill"><span class="dot"></span><span id="statusText">Connecting…</span></span>
 
       <label class="control">
+        <span>Model</span>
+        <select id="modelSelect" title="Gemini Live model (restarts the session)">
+          <option value="gemini-3.8-live-extended-thinking" selected>Extended thinking</option>
+          <option value="gemini-3.8-live">3.8 Live (fast)</option>
+        </select>
+      </label>
+
+      <label class="control">
         <span>Voice</span>
         <select id="voiceSelect" title="Change voice (restarts the session)">
           <option value="Puck" selected>Puck</option>

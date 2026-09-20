@@ -1,16 +1,22 @@
 /* ============================================================
    Gemini Live chatbot — text in, text + voice out
    Talks to the Gemini Live API over a direct WebSocket
-   (wss://generativelanguage.googleapis.com — v1beta).
+   (wss://generativelanguage.googleapis.com — tries v1alpha, then v1beta).
    Protocol reference: https://ai.google.dev/gemini-api/docs/live-api/get-started-websocket
    ============================================================ */
 
 const CFG = window.GEMINI_CONFIG || {};
-const MODEL = CFG.model || 'gemini-3.8-live-extended-thinking';
+let MODEL = CFG.model || 'gemini-3.8-live-extended-thinking';
 let API_KEY = CFG.apiKey || localStorage.getItem('gemini_api_key') || '';
 
-const WS_URL = () =>
-  `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(API_KEY)}`;
+// The extended-thinking model's docs use the v1alpha endpoint; the general
+// Live API docs use v1beta. We can't tell from here which one the key's
+// project is served on, so try both, in order.
+const API_VERSIONS = ['v1alpha', 'v1beta'];
+const SETUP_TIMEOUT_MS = 8000; // per-attempt: fail fast and fall back
+
+const WS_URL = (version) =>
+  `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.${version}.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(API_KEY)}`;
 
 const SYSTEM_PROMPT =
   'You are Gemini, a warm, friendly, and concise conversational chatbot. ' +
@@ -26,7 +32,8 @@ let current = null;         // live bot message being built
 let closedByUs = false;
 let sendCount = 0;
 let setupTimeout = null;
-const SETUP_TIMEOUT_MS = 20000; // fail loudly if setupComplete never arrives
+let versionAttempt = 0;     // index into API_VERSIONS
+let fallbackPending = false; // suppress "session closed" toast for intentional fallback closes
 
 const $ = (id) => document.getElementById(id);
 const messagesEl = $('messages');
@@ -34,9 +41,14 @@ const statusPill = $('statusPill');
 const statusText = $('statusText');
 const input = $('input');
 const sendBtn = $('sendBtn');
+const modelSelect = $('modelSelect');
 const voiceSelect = $('voiceSelect');
 const thinkingSelect = $('thinkingSelect');
 $('modelTag').textContent = MODEL;
+if (modelSelect) {
+  modelSelect.value = MODEL;
+  thinkingSelect.disabled = !MODEL.includes('extended-thinking');
+}
 
 /* ---------------- PCM audio player (16-bit, 24 kHz, mono) ---------------- */
 class PcmPlayer {
@@ -205,6 +217,38 @@ function setSendEnabled(enabled) {
 }
 
 /* ---------------- session ---------------- */
+function buildSetup() {
+  const gc = {
+    // Native-audio models respond in AUDIO only; the text arrives as
+    // outputAudioTranscription (spoken text, streamed live).
+    responseModalities: ['AUDIO'],
+    speechConfig: {
+      voiceConfig: {
+        prebuiltVoiceConfig: { voiceName: voiceSelect.value },
+      },
+    },
+  };
+  // thinkingLevel is only supported (and only valid) on the
+  // extended-thinking model — it MUST be omitted for gemini-3.8-live.
+  if (isThinkingModel()) {
+    gc.thinkingConfig = {
+      thinkingLevel: thinkingSelect.value.toUpperCase(), // LOW | MEDIUM | HIGH
+    };
+  }
+  return {
+    setup: {
+      model: `models/${MODEL}`,
+      generationConfig: gc,
+      outputAudioTranscription: {},
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    },
+  };
+}
+
+function isThinkingModel() {
+  return MODEL.includes('extended-thinking');
+}
+
 function connect() {
   if (!API_KEY) { setStatus('nokey'); toast('Add your Gemini API key in the header to start.', 'error'); return; }
 
@@ -212,47 +256,43 @@ function connect() {
   setStatus('connecting');
   setSendEnabled(false);
   current = null;
+  versionAttempt = 0;
+  openSocket();
+}
 
-  const socket = new WebSocket(WS_URL());
+function openSocket() {
+  const version = API_VERSIONS[versionAttempt];
+  const socket = new WebSocket(WS_URL(version));
   ws = socket;
+  fallbackPending = false;
+  console.log(`[live] attempting ${version} endpoint for models/${MODEL}`);
 
   socket.onopen = () => {
     console.log('[live] WebSocket open, sending setup');
-    // Match the raw-protocol setup for this model exactly (see
-    // https://ai.google.dev/gemini-api/docs/live-api/thinking — “Step 1:
-    // Session setup”): enum values on the wire are UPPERCASE, and native
-    // audio models only support ["AUDIO"] (text arrives as
-    // outputAudioTranscription).
-    const setup = {
-      setup: {
-        model: `models/${MODEL}`,
-        generationConfig: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: voiceSelect.value },
-            },
-          },
-          thinkingConfig: {
-            thinkingLevel: thinkingSelect.value.toUpperCase(), // LOW | MEDIUM | HIGH
-          },
-        },
-        outputAudioTranscription: {},
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      },
-    };
+    const setup = buildSetup();
     console.log('[live] setup ->', JSON.stringify(setup));
     socket.send(JSON.stringify(setup));
 
     setupTimeout = setTimeout(() => {
       if (!ready && isCurrent()) {
-        console.error('[live] setupComplete never arrived — closing');
-        setStatus('timeout');
-        toast(
-          'The session never confirmed setup (check the browser console). Click “New chat” to retry.',
-          'error'
-        );
+        console.error(`[live] no setupComplete on ${version} — falling back`);
+        fallbackPending = true; // this close is intentional; don't toast "session closed"
         try { socket.close(); } catch (e) { /* ignore */ }
+        versionAttempt++;
+        if (versionAttempt < API_VERSIONS.length) {
+          setStatus('connecting');
+          toast(`No session on ${version} — retrying with ${API_VERSIONS[versionAttempt]}…`, 'info');
+          setTimeout(openSocket, 300);
+        } else {
+          fallbackPending = false;
+          setStatus('error');
+          toast(
+            `Setup timed out on every API version (${API_VERSIONS.join(', ')}). ` +
+            'Try the other model in the header — if that also fails, the API key ' +
+            'likely has no access to the Gemini Live API (check AI Studio).',
+            'error'
+          );
+        }
       }
     }, SETUP_TIMEOUT_MS);
   };
@@ -285,7 +325,7 @@ function connect() {
     setSendEnabled(false);
     player.stop();
     if (current) finalizeCurrent();
-    if (!closedByUs) {
+    if (!closedByUs && !fallbackPending) {
       setStatus('disconnected');
       toast(`Session closed (${event.code}). Click “New chat” to reconnect.`, 'info');
     }
@@ -448,6 +488,12 @@ input.addEventListener('keydown', (e) => {
 });
 input.addEventListener('input', autoresize);
 $('newChatBtn').addEventListener('click', newChat);
+modelSelect.addEventListener('change', () => {
+  MODEL = modelSelect.value;
+  $('modelTag').textContent = MODEL;
+  thinkingSelect.disabled = !MODEL.includes('extended-thinking');
+  restartSession(`Model set to ${MODEL} (new session).`);
+});
 voiceSelect.addEventListener('change', () => restartSession(`Voice set to “${voiceSelect.value}” (new session).`));
 thinkingSelect.addEventListener('change', () => restartSession(`Thinking level: ${thinkingSelect.value} (new session).`));
 
