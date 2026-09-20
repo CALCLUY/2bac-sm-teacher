@@ -1,0 +1,26 @@
+{
+  "name": "gemini-live-chatbot",
+  "version": "1.0.0",
+  "description": "Chatbot that talks to gemini-3.8-live-extended-thinking via the Gemini Live API (WebSocket) — text in, text + voice out.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node scripts/test-live.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CALCLUY/2bac-sm-teacher.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/CALCLUY/2bac-sm-teacher/issues"
+  },
+  "homepage": "https://github.com/CALCLUY/2bac-sm-teacher#readme",
+  "dependencies": {
+    "dotenv": "^18.0.1",
+    "express": "^5.2.1",
+    "ws": "^8.21.3"
+  }
+}
