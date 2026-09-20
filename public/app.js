@@ -6,6 +6,7 @@
    ============================================================ */
 
 const CFG = window.GEMINI_CONFIG || {};
+const APP_VERSION = '6';
 let MODEL = CFG.model || 'gemini-3.8-live-extended-thinking';
 let API_KEY = CFG.apiKey || localStorage.getItem('gemini_api_key') || '';
 
@@ -36,6 +37,8 @@ let sendCount = 0;
 let setupTimeout = null;
 let versionAttempt = 0;     // index into API_VERSIONS
 let fallbackPending = false; // suppress "session closed" toast for intentional fallback closes
+let turnAudioChunks = 0;
+let turnTranscriptChars = 0;
 
 const $ = (id) => document.getElementById(id);
 const messagesEl = $('messages');
@@ -46,10 +49,28 @@ const sendBtn = $('sendBtn');
 const modelSelect = $('modelSelect');
 const voiceSelect = $('voiceSelect');
 const thinkingSelect = $('thinkingSelect');
-$('modelTag').textContent = MODEL;
+$('modelTag').textContent = MODEL + '  ·  v' + APP_VERSION;
 if (modelSelect) {
   modelSelect.value = MODEL;
   thinkingSelect.disabled = !MODEL.includes('extended-thinking');
+}
+$('diagVersion').textContent = 'v' + APP_VERSION;
+
+/* ---------------- diagnostics (in-page, no devtools needed) ---------------- */
+const diagList = $('diagList');
+const diagBox = $('diagBox');
+function diag(msg, kind) {
+  const line = document.createElement('div');
+  if (kind) line.className = 'diag-' + kind;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  diagList.appendChild(line);
+  while (diagList.children.length > 40) diagList.firstChild.remove();
+  diagList.scrollTop = diagList.scrollHeight;
+  console.log('[diag]', msg);
+}
+function diagFail(msg) {
+  diag(msg, 'err');
+  diagBox.open = true;
 }
 
 /* ---------------- PCM audio player (16-bit, 24 kHz, mono) ---------------- */
@@ -114,12 +135,17 @@ class PcmPlayer {
 
 const player = new PcmPlayer(24000); // Live API audio output is always 24 kHz / 16-bit / mono
 
+let audioDiagnosed = false;
 player.onActivity = (speaking) => {
   if (current) current.el.querySelector('.eq').classList.toggle('active', speaking);
   if (!speaking) {
     document.body.classList.remove('speaking');
   } else {
     document.body.classList.add('speaking');
+    if (!audioDiagnosed) {
+      audioDiagnosed = true;
+      diag(`audio playing (AudioContext state: ${player.ctx ? player.ctx.state : 'n/a'})`, 'ok');
+    }
   }
 };
 
@@ -275,12 +301,14 @@ function openSocket() {
   const socket = new WebSocket(WS_URL(version));
   ws = socket;
   fallbackPending = false;
+  diag(`attempting ${version} endpoint (model: ${MODEL})`);
   console.log(`[live] attempting ${version} endpoint for models/${MODEL}`);
 
   socket.onopen = () => {
     console.log('[live] WebSocket open, sending setup');
     const setup = buildSetup();
     console.log('[live] setup ->', JSON.stringify(setup));
+    diag(`ws open — setup sent (voice: ${voiceSelect.value || 'default'}, thinking: ${isThinkingModel() ? thinkingSelect.value : 'n/a'})`, 'ok');
     socket.send(JSON.stringify(setup));
 
     setupTimeout = setTimeout(() => {
@@ -291,11 +319,13 @@ function openSocket() {
         versionAttempt++;
         if (versionAttempt < API_VERSIONS.length) {
           setStatus('connecting');
+          diagFail(`no setupComplete on ${version} — retrying with ${API_VERSIONS[versionAttempt]}…`);
           toast(`No session on ${version} — retrying with ${API_VERSIONS[versionAttempt]}…`, 'info');
           setTimeout(openSocket, 300);
         } else {
           fallbackPending = false;
           setStatus('error');
+          diagFail(`setup timed out on ALL endpoints (${API_VERSIONS.join(', ')})`);
           toast(
             `Setup timed out on every API version (${API_VERSIONS.join(', ')}). ` +
             'Try the other model in the header — if that also fails, the API key ' +
@@ -314,6 +344,20 @@ function openSocket() {
     if (!isCurrent()) return;
     let m;
     try { m = JSON.parse(event.data); } catch (e) { console.warn('[live] non-JSON message', e); return; }
+
+    const sc = m.serverContent;
+    if (m.setupComplete) diag('recv: setupComplete', 'ok');
+    else if (m.googRpc) diagFail(`recv: GOOGLE ERROR ${m.googRpc.code || ''}: ${m.googRpc.message || 'unknown'}`);
+    else if (m.error) diagFail('recv: ERROR ' + (m.error.message || JSON.stringify(m.error)));
+    else if (m.sessionEnd) diag('recv: sessionEnd');
+    else if (sc) {
+      turnAudioChunks += (sc.modelTurn?.parts || []).filter(p => p.inlineData?.data).length;
+      if (sc.outputTranscription?.text) turnTranscriptChars += sc.outputTranscription.text.length;
+      if (sc.thought) diag('recv: thought summary');
+      if (sc.interrupted) diag('recv: interrupted');
+      if (sc.interactionStatus) diag('interactionStatus: ' + sc.interactionStatus);
+      if (sc.turnComplete) diag(`recv: turnComplete (audio chunks: ${turnAudioChunks}, transcript chars: ${turnTranscriptChars})`, 'ok');
+    }
     console.log('[live] <-', m.setupComplete ? 'setupComplete' : Object.keys(m).join(','), m);
     handleServerMessage(m);
   };
@@ -323,6 +367,7 @@ function openSocket() {
     if (isCurrent()) {
       clearTimeout(setupTimeout);
       setStatus('error');
+      diagFail('ws error — check API key / network');
       toast('Connection error — check your API key / network.', 'error');
     }
   };
@@ -330,6 +375,7 @@ function openSocket() {
   socket.onclose = (event) => {
     console.log('[live] WebSocket closed', event.code, event.reason.toString());
     clearTimeout(setupTimeout);
+    diag(`ws closed (code ${event.code}${event.reason ? ': ' + event.reason : ''})`);
     if (!isCurrent()) return; // superseded by a newer session
     ready = false;
     setSendEnabled(false);
@@ -360,6 +406,7 @@ function handleServerMessage(m) {
     clearTimeout(setupTimeout);
     setStatus('live');
     setSendEnabled(true);
+    diag('setupComplete — session READY', 'ok');
     console.log('[live] setup complete — session ready');
     return;
   }
@@ -438,11 +485,15 @@ function sendText(text) {
   addUserMessage(text);
   current = null;
   sendCount++;
+  turnAudioChunks = 0;
+  turnTranscriptChars = 0;
+  audioDiagnosed = false;
   setStatus('working');
 
   // Same primitive as the working reference app: plain realtimeInput text.
   const msg = { realtimeInput: { text } };
   ws.send(JSON.stringify(msg));
+  diag(`sent text turn #${sendCount}`);
   input.value = '';
   autoresize();
   console.log('[live] sent text turn #%d', sendCount);
@@ -519,9 +570,11 @@ document.querySelectorAll('.chip').forEach((chip) => {
 document.addEventListener('pointerdown', () => player.ensure(), { once: true });
 
 /* ---------------- boot ---------------- */
+console.log(`[live] app v${APP_VERSION} loaded`);
 if (!API_KEY) {
   // Ask for a key inline (only when the server didn't provide one)
   setStatus('nokey');
+  diag('app v' + APP_VERSION + ' loaded — NO key configured; using in-browser prompt', 'err');
   const keyWrap = document.createElement('div');
   keyWrap.className = 'key-ask';
   keyWrap.innerHTML = `
@@ -541,9 +594,11 @@ if (!API_KEY) {
     API_KEY = k;
     localStorage.setItem('gemini_api_key', k);
     keyWrap.remove();
+    diag('key entered via browser prompt (stored in localStorage)', 'ok');
     connect();
   }
 } else {
+  diag(`app v${APP_VERSION} loaded — key from ${CFG.apiKey ? 'config.js' : 'localStorage'}`, 'ok');
   addWelcome();
   connect();
 }
