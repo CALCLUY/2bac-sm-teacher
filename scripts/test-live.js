@@ -30,7 +30,7 @@ ws.addEventListener('open', () => {
           responseModalities: ['AUDIO'],
           temperature: 1.0,
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
-          thinkingConfig: { thinkingLevel: 'medium', includeThoughts: true },
+          thinkingConfig: { thinkingLevel: 'MEDIUM' },
         },
         outputAudioTranscription: {},
         systemInstruction: { parts: [{ text: 'You are a friendly, concise chatbot.' }] },

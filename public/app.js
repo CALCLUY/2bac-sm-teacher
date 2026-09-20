@@ -25,6 +25,8 @@ let ready = false;          // setupComplete received
 let current = null;         // live bot message being built
 let closedByUs = false;
 let sendCount = 0;
+let setupTimeout = null;
+const SETUP_TIMEOUT_MS = 20000; // fail loudly if setupComplete never arrives
 
 const $ = (id) => document.getElementById(id);
 const messagesEl = $('messages');
@@ -124,6 +126,7 @@ function setStatus(kind) {
     disconnected: 'Disconnected',
     error: 'Error',
     nokey: 'API key needed',
+    timeout: 'Setup timeout',
   };
   statusText.textContent = labels[kind] || kind;
 }
@@ -215,29 +218,43 @@ function connect() {
 
   socket.onopen = () => {
     console.log('[live] WebSocket open, sending setup');
+    // Match the raw-protocol setup for this model exactly (see
+    // https://ai.google.dev/gemini-api/docs/live-api/thinking — “Step 1:
+    // Session setup”): enum values on the wire are UPPERCASE, and native
+    // audio models only support ["AUDIO"] (text arrives as
+    // outputAudioTranscription).
     const setup = {
       setup: {
         model: `models/${MODEL}`,
         generationConfig: {
-          // Native-audio models respond in AUDIO only; the text arrives as
-          // outputAudioTranscription (spoken text, streamed live).
           responseModalities: ['AUDIO'],
-          temperature: 1.0,
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: { voiceName: voiceSelect.value },
             },
           },
           thinkingConfig: {
-            thinkingLevel: thinkingSelect.value,
-            includeThoughts: true,
+            thinkingLevel: thinkingSelect.value.toUpperCase(), // LOW | MEDIUM | HIGH
           },
         },
         outputAudioTranscription: {},
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
       },
     };
+    console.log('[live] setup ->', JSON.stringify(setup));
     socket.send(JSON.stringify(setup));
+
+    setupTimeout = setTimeout(() => {
+      if (!ready && isCurrent()) {
+        console.error('[live] setupComplete never arrived — closing');
+        setStatus('timeout');
+        toast(
+          'The session never confirmed setup (check the browser console). Click “New chat” to retry.',
+          'error'
+        );
+        try { socket.close(); } catch (e) { /* ignore */ }
+      }
+    }, SETUP_TIMEOUT_MS);
   };
 
   // Guards: a replaced (superseded) socket must not touch shared state.
@@ -247,16 +264,22 @@ function connect() {
     if (!isCurrent()) return;
     let m;
     try { m = JSON.parse(event.data); } catch (e) { console.warn('[live] non-JSON message', e); return; }
+    console.log('[live] <-', m.setupComplete ? 'setupComplete' : Object.keys(m).join(','), m);
     handleServerMessage(m);
   };
 
   socket.onerror = (e) => {
     console.error('[live] WebSocket error', e);
-    if (isCurrent()) toast('Connection error — check your API key / network.', 'error');
+    if (isCurrent()) {
+      clearTimeout(setupTimeout);
+      setStatus('error');
+      toast('Connection error — check your API key / network.', 'error');
+    }
   };
 
   socket.onclose = (event) => {
     console.log('[live] WebSocket closed', event.code, event.reason.toString());
+    clearTimeout(setupTimeout);
     if (!isCurrent()) return; // superseded by a newer session
     ready = false;
     setSendEnabled(false);
@@ -284,6 +307,7 @@ function handleServerMessage(m) {
   }
   if (m.setupComplete) {
     ready = true;
+    clearTimeout(setupTimeout);
     setStatus('live');
     setSendEnabled(true);
     console.log('[live] setup complete — session ready');
