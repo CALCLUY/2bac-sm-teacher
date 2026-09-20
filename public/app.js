@@ -9,20 +9,22 @@ const CFG = window.GEMINI_CONFIG || {};
 let MODEL = CFG.model || 'gemini-3.8-live-extended-thinking';
 let API_KEY = CFG.apiKey || localStorage.getItem('gemini_api_key') || '';
 
-// The extended-thinking model's docs use the v1alpha endpoint; the general
-// Live API docs use v1beta. We can't tell from here which one the key's
-// project is served on, so try both, in order.
-const API_VERSIONS = ['v1alpha', 'v1beta'];
+// v1beta is the proven endpoint (matches the working reference app);
+// v1alpha is kept as a fallback.
+const API_VERSIONS = ['v1beta', 'v1alpha'];
 const SETUP_TIMEOUT_MS = 8000; // per-attempt: fail fast and fall back
 
 const WS_URL = (version) =>
   `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.${version}.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(API_KEY)}`;
 
 const SYSTEM_PROMPT =
-  'You are Gemini, a warm, friendly, and concise conversational chatbot. ' +
+  'You are a thoughtful, warm and concise conversational assistant. ' +
   'Your replies are spoken aloud at the same time they are shown as text, ' +
   'so keep them natural and conversational — usually one to three short paragraphs. ' +
+  'Answer the user directly, with clear structure and a warm, natural speaking style. ' +
   'Avoid markdown, tables and code blocks in your spoken replies. ' +
+  'Do not mention hidden reasoning or chain-of-thought; if a response is complex, ' +
+  'summarize the key points instead. ' +
   'If the user writes in a language other than English, reply in that language.';
 
 /* ---------------- state ---------------- */
@@ -222,17 +224,25 @@ function buildSetup() {
     // Native-audio models respond in AUDIO only; the text arrives as
     // outputAudioTranscription (spoken text, streamed live).
     responseModalities: ['AUDIO'],
-    speechConfig: {
-      voiceConfig: {
-        prebuiltVoiceConfig: { voiceName: voiceSelect.value },
-      },
-    },
   };
   // thinkingLevel is only supported (and only valid) on the
   // extended-thinking model — it MUST be omitted for gemini-3.8-live.
+  // (lowercase values, as accepted by the Live API — see the working
+  // reference app which sends thinkingLevel: "high")
   if (isThinkingModel()) {
     gc.thinkingConfig = {
-      thinkingLevel: thinkingSelect.value.toUpperCase(), // LOW | MEDIUM | HIGH
+      thinkingLevel: thinkingSelect.value, // low | medium | high
+    };
+  }
+  // Voice config is OPTIONAL: the working reference app sends none and
+  // uses the default voice. Some voices may not exist for this model,
+  // in which case the setup is silently rejected — so "Default" is the
+  // safe choice and the recommended one.
+  if (voiceSelect.value) {
+    gc.speechConfig = {
+      voiceConfig: {
+        prebuiltVoiceConfig: { voiceName: voiceSelect.value },
+      },
     };
   }
   return {
@@ -430,12 +440,8 @@ function sendText(text) {
   sendCount++;
   setStatus('working');
 
-  const msg = {
-    clientContent: {
-      turns: [{ role: 'user', parts: [{ text }] }],
-      turnComplete: true, // text-only chat: the whole turn in one message
-    },
-  };
+  // Same primitive as the working reference app: plain realtimeInput text.
+  const msg = { realtimeInput: { text } };
   ws.send(JSON.stringify(msg));
   input.value = '';
   autoresize();
@@ -494,7 +500,11 @@ modelSelect.addEventListener('change', () => {
   thinkingSelect.disabled = !MODEL.includes('extended-thinking');
   restartSession(`Model set to ${MODEL} (new session).`);
 });
-voiceSelect.addEventListener('change', () => restartSession(`Voice set to “${voiceSelect.value}” (new session).`));
+voiceSelect.addEventListener('change', () => restartSession(
+  voiceSelect.value
+    ? `Voice set to “${voiceSelect.value}” (new session). If it can't connect, switch back to Default.`
+    : 'Voice set to Default (model built-in voice). New session.'
+));
 thinkingSelect.addEventListener('change', () => restartSession(`Thinking level: ${thinkingSelect.value} (new session).`));
 
 document.querySelectorAll('.chip').forEach((chip) => {

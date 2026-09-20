@@ -30,8 +30,9 @@
 
       <label class="control">
         <span>Voice</span>
-        <select id="voiceSelect" title="Change voice (restarts the session)">
-          <option value="Puck" selected>Puck</option>
+        <select id="voiceSelect" title="Voice — “Default” uses the model’s built-in voice (safest); custom voices restart the session">
+          <option value="" selected>Default</option>
+          <option value="Puck">Puck</option>
           <option value="Kore">Kore</option>
           <option value="Charon">Charon</option>
           <option value="Fenrir">Fenrir</option>
@@ -53,9 +54,9 @@
       <label class="control">
         <span>Thinking</span>
         <select id="thinkingSelect" title="Extended-thinking depth (restarts the session)">
-          <option value="LOW">Low</option>
-          <option value="MEDIUM" selected>Medium</option>
-          <option value="HIGH">High</option>
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
         </select>
       </label>
 

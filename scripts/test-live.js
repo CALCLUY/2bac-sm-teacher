@@ -2,8 +2,9 @@
  * CLI smoke test for the Gemini Live API (run on a machine with internet
  * access: `npm test`). Uses Node's built-in WebSocket client (Node >= 22).
  *
- * Tries the v1alpha and v1beta endpoints for the configured model, sends one
- * text turn, and prints audio chunks + the streamed transcript.
+ * Mirrors the setup of the known-working reference implementation:
+ * v1beta endpoint, no speechConfig, lowercase thinkingLevel, plain
+ * realtimeInput text. Falls back to v1alpha if v1beta stays silent.
  */
 require('dotenv').config();
 
@@ -14,7 +15,7 @@ if (!key) {
   process.exit(1);
 }
 
-const VERSIONS = ['v1alpha', 'v1beta'];
+const VERSIONS = ['v1beta', 'v1alpha'];
 let versionIdx = 0;
 let setupDone = false;
 let audioBytes = 0;
@@ -26,21 +27,19 @@ function connect() {
     `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.${version}.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(key)}`;
   console.log(`\n=== attempting ${version} endpoint ===`);
   const ws = new WebSocket(url);
-  let done = false;
 
   ws.addEventListener('open', () => {
     console.log('connected to Gemini Live WS');
-    const gc = {
-      responseModalities: ['AUDIO'],
-      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } },
-    };
-    if (model.includes('extended-thinking')) gc.thinkingConfig = { thinkingLevel: 'MEDIUM' };
+    const gc = { responseModalities: ['AUDIO'] };
+    if (model.includes('extended-thinking')) gc.thinkingConfig = { thinkingLevel: 'high' };
     ws.send(JSON.stringify({
       setup: {
         model: `models/${model}`,
         generationConfig: gc,
+        systemInstruction: {
+          parts: [{ text: 'You are a thoughtful, concise voice assistant.' }],
+        },
         outputAudioTranscription: {},
-        systemInstruction: { parts: [{ text: 'You are a friendly, concise chatbot.' }] },
       },
     }));
     setupTimeout = setTimeout(() => {
@@ -56,12 +55,7 @@ function connect() {
       setupDone = true;
       clearTimeout(setupTimeout);
       console.log('SETUP COMPLETE — session ready');
-      ws.send(JSON.stringify({
-        clientContent: {
-          turns: [{ role: 'user', parts: [{ text: 'Say hello in exactly one short sentence.' }] }],
-          turnComplete: true,
-        },
-      }));
+      ws.send(JSON.stringify({ realtimeInput: { text: 'Say hello in exactly one short sentence.' } }));
     }
 
     if (msg.googRpc) console.log('GOOG RPC:', JSON.stringify(msg.googRpc));
@@ -86,7 +80,6 @@ function connect() {
   });
 
   ws.addEventListener('close', (e) => {
-    done = true;
     clearTimeout(setupTimeout);
     console.log(`closed code=${e.code} reason=${e.reason} (audio=${audioBytes}B)`);
     if (!setupDone && versionIdx + 1 < VERSIONS.length) {
