@@ -1,12 +1,20 @@
 /* ============================================================
    Gemini Live chatbot — text in, text + voice out
-   Talks to the Gemini Live API over a direct WebSocket
-   (wss://generativelanguage.googleapis.com — tries v1alpha, then v1beta).
+   Proxy mode (default when served by server.js):
+     browser ⇄ /api/live ⇄ Gemini Live API (v1beta) — key stays on the server.
+   Direct mode (static Pages build):
+     browser ⇄ wss://generativelanguage.googleapis.com (v1beta, then v1alpha),
+     with the key from config.js/localStorage.
    Protocol reference: https://ai.google.dev/gemini-api/docs/live-api/get-started-websocket
    ============================================================ */
 
 const CFG = window.GEMINI_CONFIG || {};
-const APP_VERSION = '6';
+const APP_VERSION = '7';
+// proxy: browser -> our server -> Google (key on the server; supported path
+//        for the Live API, mirrors the working reference app)
+// direct: browser -> Google (needs a key in the browser; works only if
+//        Google allows raw-key browser sessions)
+const MODE = CFG.mode === 'proxy' ? 'proxy' : 'direct';
 let MODEL = CFG.model || 'gemini-3.8-live-extended-thinking';
 let API_KEY = CFG.apiKey || localStorage.getItem('gemini_api_key') || '';
 
@@ -17,6 +25,12 @@ const SETUP_TIMEOUT_MS = 8000; // per-attempt: fail fast and fall back
 
 const WS_URL = (version) =>
   `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.${version}.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(API_KEY)}`;
+
+const CLIENT_WS_URL = () => {
+  if (CFG.proxyUrl) return CFG.proxyUrl; // static build pointed at a remote proxy
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${proto}://${location.host}/api/live`;
+};
 
 const SYSTEM_PROMPT =
   'You are a thoughtful, warm and concise conversational assistant. ' +
@@ -286,7 +300,7 @@ function isThinkingModel() {
 }
 
 function connect() {
-  if (!API_KEY) { setStatus('nokey'); toast('Add your Gemini API key in the header to start.', 'error'); return; }
+  if (MODE === 'direct' && !API_KEY) { setStatus('nokey'); toast('Add your Gemini API key in the header to start.', 'error'); return; }
 
   closedByUs = false;
   setStatus('connecting');
@@ -298,18 +312,30 @@ function connect() {
 
 function openSocket() {
   const version = API_VERSIONS[versionAttempt];
-  const socket = new WebSocket(WS_URL(version));
+  const socket = new WebSocket(MODE === 'proxy' ? CLIENT_WS_URL() : WS_URL(version));
   ws = socket;
   fallbackPending = false;
-  diag(`attempting ${version} endpoint (model: ${MODEL})`);
-  console.log(`[live] attempting ${version} endpoint for models/${MODEL}`);
+  diag(MODE === 'proxy' ? 'connecting to /api/live proxy (key stays on server)' : `attempting ${version} endpoint (model: ${MODEL})`);
+  console.log(`[live] ${MODE === 'proxy' ? 'proxy mode' : 'attempting ' + version + ' endpoint'} for models/${MODEL}`);
 
   socket.onopen = () => {
-    console.log('[live] WebSocket open, sending setup');
-    const setup = buildSetup();
-    console.log('[live] setup ->', JSON.stringify(setup));
-    diag(`ws open — setup sent (voice: ${voiceSelect.value || 'default'}, thinking: ${isThinkingModel() ? thinkingSelect.value : 'n/a'})`, 'ok');
-    socket.send(JSON.stringify(setup));
+    if (MODE === 'proxy') {
+      const init = {
+        type: 'init',
+        model: MODEL,
+        voiceName: voiceSelect.value || undefined,
+        thinkingLevel: isThinkingModel() ? thinkingSelect.value : undefined,
+        systemPrompt: SYSTEM_PROMPT,
+      };
+      diag('proxy: init sent (model: ' + MODEL + ', voice: ' + (voiceSelect.value || 'default') + ', thinking: ' + (isThinkingModel() ? thinkingSelect.value : 'n/a') + ')', 'ok');
+      socket.send(JSON.stringify(init));
+    } else {
+      console.log('[live] WebSocket open, sending setup');
+      const setup = buildSetup();
+      console.log('[live] setup ->', JSON.stringify(setup));
+      diag(`ws open — setup sent (voice: ${voiceSelect.value || 'default'}, thinking: ${isThinkingModel() ? thinkingSelect.value : 'n/a'})`, 'ok');
+      socket.send(JSON.stringify(setup));
+    }
 
     setupTimeout = setTimeout(() => {
       if (!ready && isCurrent()) {
@@ -317,7 +343,7 @@ function openSocket() {
         fallbackPending = true; // this close is intentional; don't toast "session closed"
         try { socket.close(); } catch (e) { /* ignore */ }
         versionAttempt++;
-        if (versionAttempt < API_VERSIONS.length) {
+        if (MODE === 'direct' && versionAttempt < API_VERSIONS.length) {
           setStatus('connecting');
           diagFail(`no setupComplete on ${version} — retrying with ${API_VERSIONS[versionAttempt]}…`);
           toast(`No session on ${version} — retrying with ${API_VERSIONS[versionAttempt]}…`, 'info');
@@ -325,11 +351,16 @@ function openSocket() {
         } else {
           fallbackPending = false;
           setStatus('error');
-          diagFail(`setup timed out on ALL endpoints (${API_VERSIONS.join(', ')})`);
+          const pagesHint = MODE === 'direct'
+            ? ' You are in DIRECT mode (browser talks to Google directly). GitHub Pages cannot run a proxy server — deploy server.js on any Node host (Render/Railway/Fly, or wherever gemini-voice-chat runs) with GEMINI_API_KEY set, and the app runs in proxy mode automatically. See README.md.'
+            : '';
+          diagFail(`setup timed out on ALL endpoints (${API_VERSIONS.join(', ')})${pagesHint}`);
           toast(
-            `Setup timed out on every API version (${API_VERSIONS.join(', ')}). ` +
-            'Try the other model in the header — if that also fails, the API key ' +
-            'likely has no access to the Gemini Live API (check AI Studio).',
+            MODE === 'proxy'
+              ? 'The Live session could not be established through the proxy — check the server console.'
+              : `Setup timed out on every API version (${API_VERSIONS.join(', ')}). ` +
+                'Try the other model in the header — if that also fails, the API key ' +
+                'likely has no access to the Gemini Live API (check AI Studio).',
             'error'
           );
         }
@@ -367,8 +398,8 @@ function openSocket() {
     if (isCurrent()) {
       clearTimeout(setupTimeout);
       setStatus('error');
-      diagFail('ws error — check API key / network');
-      toast('Connection error — check your API key / network.', 'error');
+      diagFail(MODE === 'proxy' ? 'ws error — could not reach /api/live on this server' : 'ws error — check API key / network');
+      toast(MODE === 'proxy' ? 'Could not reach the /api/live proxy on this server.' : 'Connection error — check your API key / network.', 'error');
     }
   };
 
@@ -390,6 +421,24 @@ function openSocket() {
 }
 
 function handleServerMessage(m) {
+  // Proxy control messages (server <-> browser framing).
+  if (m.type === 'upstreamError') {
+    setStatus('error');
+    diagFail('proxy: upstream error — ' + (m.message || 'unknown'));
+    toast('The server could not reach the Gemini Live API: ' + (m.message || 'unknown'), 'error');
+    return;
+  }
+  if (m.type === 'upstreamClosed') {
+    diag(`proxy: upstream closed (${m.code} ${m.reason || ''})`);
+    if (ready) {
+      ready = false;
+      setSendEnabled(false);
+      setStatus('disconnected');
+      toast('Session ended on the server. Click “New chat” to reconnect.', 'info');
+    }
+    return;
+  }
+
   if (m.googRpc) {
     console.error('[live] googRpc', m.googRpc);
     setStatus('error');
@@ -490,9 +539,12 @@ function sendText(text) {
   audioDiagnosed = false;
   setStatus('working');
 
-  // Same primitive as the working reference app: plain realtimeInput text.
-  const msg = { realtimeInput: { text } };
-  ws.send(JSON.stringify(msg));
+  if (MODE === 'proxy') {
+    ws.send(JSON.stringify({ type: 'text', text }));
+  } else {
+    // Same primitive as the working reference app: plain realtimeInput text.
+    ws.send(JSON.stringify({ realtimeInput: { text } }));
+  }
   diag(`sent text turn #${sendCount}`);
   input.value = '';
   autoresize();
@@ -570,8 +622,13 @@ document.querySelectorAll('.chip').forEach((chip) => {
 document.addEventListener('pointerdown', () => player.ensure(), { once: true });
 
 /* ---------------- boot ---------------- */
-console.log(`[live] app v${APP_VERSION} loaded`);
-if (!API_KEY) {
+console.log(`[live] app v${APP_VERSION} loaded (mode: ${MODE})`);
+if (MODE === 'proxy') {
+  // The key lives on the server — nothing to ask the browser for.
+  diag(`app v${APP_VERSION} loaded — proxy mode (key stays on the server)`, 'ok');
+  addWelcome();
+  connect();
+} else if (!API_KEY) {
   // Ask for a key inline (only when the server didn't provide one)
   setStatus('nokey');
   diag('app v' + APP_VERSION + ' loaded — NO key configured; using in-browser prompt', 'err');

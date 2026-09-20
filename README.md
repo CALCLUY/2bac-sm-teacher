@@ -1,21 +1,39 @@
 # Gemini Live Chatbot — text in, text + voice out
 
 A small web chatbot that talks to **`gemini-3.8-live-extended-thinking`** through the
-[Gemini Live API](https://ai.google.dev/gemini-api/docs/live-api/get-started-websocket) over a raw
-WebSocket. You send **text** messages; Gemini answers with **spoken voice and live text at the same time**
+[Gemini Live API](https://ai.google.dev/gemini-api/docs/live-api/get-started-websocket).
+You send **text** messages; Gemini answers with **spoken voice and live text at the same time**
 (native-audio models only support `["AUDIO"]` response modality, so the text is the model's
 `outputAudioTranscription`, streamed token by token while the audio plays).
 
+## Architecture (why there is a proxy)
+
 ```
-browser ──(wss, api key in URL)──► Gemini Live API (v1beta)
-    ▲                                    │
-    │  24 kHz 16-bit PCM audio (base64)  │  streamed transcript
-    └────────────────────────────────────┘
+browser  ──(wss)──►  this server  ──(wss, api key)──►  Gemini Live API (v1beta)
+    ▲
+    │  24 kHz 16-bit PCM audio (base64)  +  streamed transcript
+    └───────────────────────────────────────────────┘
 ```
 
-The browser connects **directly** to Google (same approach as Google's own web
-examples), which is required because the Live API does not allow
-server-to-server proxying of the session from an arbitrary origin.
+The browser talks to **`/api/live` on this server**, which opens the real
+`wss://generativelanguage.googleapis.com/ws/…BidiGenerateContent` socket
+server-side and relays messages both ways. The API key lives **only** in the
+server environment (`.env` / platform env vars) — it never reaches the browser.
+
+This is the same architecture as the proven-working `gemini-voice-chat` app,
+and it is required in practice: the Live API **silently drops raw-API-key
+sessions opened directly from a browser** (the WebSocket opens, the setup is
+sent, and Google never answers — verified with the in-page diagnostics). The
+same setup works fine from a Node server. The capabilities doc states the
+Live API is server-to-server by default.
+
+The app supports two modes, chosen by `window.GEMINI_CONFIG.mode`:
+
+- **`proxy`** (served by `server.js`) — the supported path above. No key
+  prompt, no key in the browser.
+- **`direct`** (static GitHub Pages build) — the browser connects straight to
+  Google with a key from `config.js`/localStorage. Kept as a fallback/demo;
+  it works only where Google allows browser-origin raw-key sessions.
 
 ## Features
 
@@ -23,60 +41,70 @@ server-to-server proxying of the session from an arbitrary origin.
 - 🎙️ Real-time voice playback (raw 24 kHz/16-bit/mono PCM → Web Audio, queued with no gaps)
 - 💬 Live streamed transcript shown next to the audio
 - 💭 Extended-thinking summaries (collapsible "thinking" block)
-- 🎚️ Voice picker (Puck, Kore, Charon, …) and thinking level (low / medium / high)
+- 🎚️ Voice picker (Default recommended) and thinking level (low / medium / high)
 - 🔄 Session management: status pill (Live / Thinking… / Disconnected), New chat, auto-interrupt
   of a playing answer when you send a new message
-- 🔑 Falls back to an in-browser key prompt (localStorage) if no key is configured
+- 🩺 In-page diagnostics box (bottom of the page) — no DevTools needed
+- 🔑 Direct mode falls back to an in-browser key prompt (localStorage)
 
 ## Where the API key comes from
 
-The app reads `window.GEMINI_CONFIG` from `public/config.js`. In priority order:
-
-1. **A GitHub Actions secret `GEMINI_API_KEY`** — if it exists, the Pages build
-   (`scripts/build-static.js`) regenerates `config.js` with that key, so the
-   secret never has to live in the repo. (Recommended for anything you keep.)
-2. **The committed `public/config.js`** — used as-is when no secret is set.
-   ⚠️ This repo is public, so any key committed there is visible to everyone.
-   The value currently in the file is a personal **test** key; rotate it if it
-   must not stay public.
-3. **A one-time in-browser prompt** (stored in `localStorage`) — shown only if
-   neither of the above provides a key.
-
-To run the Node server locally with your own key without touching the committed
-file, put it in `.env` (gitignored) instead — `server.js` overrides
-`/config.js` at request time.
+- **Proxy mode:** `GEMINI_API_KEY` environment variable on the server
+  (`.env` locally, platform env vars when hosted). It is sent only to Google
+  by the server, never to the browser.
+- **Direct mode (Pages):** `window.GEMINI_CONFIG` from `config.js` —
+  a GitHub Actions secret `GEMINI_API_KEY` is injected at build time if set,
+  otherwise a one-time in-browser prompt (stored in `localStorage`).
+  ⚠️ This repo is public — anything committed to `public/config.js` is visible
+  to everyone.
 
 ## Run locally
 
 ```bash
 npm install
-npm start          # → http://localhost:8080
+npm start          # → http://localhost:8080  (proxy mode, reads .env)
+```
+
+Create `.env` (gitignored) first:
+
+```
+GEMINI_API_KEY=your-key
+GEMINI_LIVE_MODEL=gemini-3.8-live-extended-thinking
+PORT=8080
 ```
 
 Requires Node 18+ (22 recommended).
 
-## Configuration
+## Deploy it (recommended: any Node host)
 
-| Variable (`.env`, local only) | Default                             | Meaning                             |
-| ----------------------------- | ----------------------------------- | ----------------------------------- |
-| `GEMINI_API_KEY`              | —                                   | Your Gemini API key (AI Studio)     |
-| `GEMINI_LIVE_MODEL`           | `gemini-3.8-live-extended-thinking` | Live model to use                   |
-| `PORT`                        | `8080`                              | Port for the web UI                 |
+GitHub Pages **cannot run the proxy**, so the working deployment is a Node
+server — the easiest option is the same host you already use for
+`gemini-voice-chat`, or any PaaS:
 
-`.env` is gitignored. The Pages deployment is configured separately (below).
+**Render / Railway / Fly.io / VPS — any of them:**
 
-## Host on GitHub Pages (from this branch, not main)
+1. Push this branch (`arena/01a0bc04-2bac-sm-teacher`) to a repo the host
+   watches, or clone it.
+2. `npm install`
+3. Set the environment variable **`GEMINI_API_KEY`**
+   (optionally `GEMINI_LIVE_MODEL`, `PORT`).
+4. Start command: **`npm start`** (or `node server.js`).
+   On PaaS platforms that assign the port (Render: `$PORT`, Railway: `PORT`),
+   the server picks it up automatically.
+5. Open the assigned URL — the page runs in proxy mode with no key prompt.
+
+Then point your browser at that URL (or, if you keep the Pages site, set
+`proxyUrl` in its `config.js` to `https://<your-host>/api/live` — the static
+build will then talk to your remote proxy).
+
+### GitHub Pages (static, direct mode — demo only)
 
 A GitHub Actions workflow (`.github/workflows/deploy-pages.yml`) builds the
-static site and deploys it to GitHub Pages **from this branch**.
+static site and deploys it to GitHub Pages **from this branch** (not main).
+One-time setup you must do in the UI:
 
-One-time setup you must do in the UI (the automation token here can't toggle
-Pages for you):
-
-1. Repo → **Settings → Pages**.
-2. **Build and deployment → Source:** *Deploy from a branch*.
-3. Pick branch `arena/01a0bc04-2bac-sm-teacher`, path `/`, **Save**.
-4. Push (or use *Actions → Run workflow*) to trigger the first deploy.
+1. Repo → **Settings → Pages** → **Build and deployment → Source:** *Deploy from a branch*.
+2. Branch `arena/01a0bc04-2bac-sm-teacher`, path `/`, **Save**.
 
 Site URL: `https://<owner>.github.io/2bac-sm-teacher/`
 
@@ -84,6 +112,19 @@ The workflow:
 - `scripts/build-static.js` → copies `public/` into `build/`, and if a
   `GEMINI_API_KEY` secret is set, writes `build/config.js` from it.
 - `actions/upload-pages-artifact` + `actions/deploy-pages` → publish.
+
+Because Pages is static, the hosted page runs in **direct mode** (browser →
+Google), which is the path Google currently drops for raw API keys — expect
+the diagnostics box to explain the situation if it fails. The real
+experience is the Node-hosted proxy above.
+
+## Configuration
+
+| Variable | Where      | Default                             | Meaning                             |
+| -------- | ---------- | ----------------------------------- | ----------------------------------- |
+| `GEMINI_API_KEY` | server env / `.env` / Actions secret | — | Your Gemini API key (AI Studio) |
+| `GEMINI_LIVE_MODEL` | server env / `.env` | `gemini-3.8-live-extended-thinking` | Live model to use |
+| `PORT` | server env / `.env` | `8080` | Port for the web UI (auto on PaaS) |
 
 ## Notes & limits
 
@@ -93,17 +134,21 @@ The workflow:
   `interactionStatus: IN_PROGRESS` and `turnComplete` alone does not mean idle — the UI
   accounts for that.
 - Voice output is always 24 kHz 16-bit little-endian mono PCM from the Live API.
-- Test the raw protocol from a terminal (needs internet): `npm test`.
+- The upstream session setup mirrors the working `gemini-voice-chat` protocol exactly
+  (v1beta endpoint, `responseModalities: ["AUDIO"]`, `thinkingLevel` in lowercase,
+  `inputAudioTranscription`/`outputAudioTranscription`, `realtimeInput.text` messages,
+  no `speechConfig` when "Default" voice is selected).
+- Test the raw protocol from a terminal (needs internet + `GEMINI_API_KEY`): `npm test`.
 
 ## Layout
 
 ```
-.github/workflows/deploy-pages.yml  CI build + Pages deploy (this branch)
-server.js                           local static host + /config.js key injection
+.github/workflows/deploy-pages.yml  CI build + Pages deploy (this branch, static/direct mode)
+server.js                           web server: static files + /api/live Live-API proxy (proxy mode)
 public/index.html                   chat UI
-public/app.js                       Live API client, PCM player, session management
+public/app.js                       Live client (proxy + direct modes), PCM player, diagnostics
 public/styles.css                   styling
-public/config.js                    committed key/model for the Pages build
+public/config.js                    committed config template (Pages/direct mode)
 scripts/build-static.js             static build for GitHub Pages
 scripts/test-live.js                CLI smoke test of the WebSocket protocol
 .env                                local API key (gitignored)
